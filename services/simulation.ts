@@ -1,3 +1,4 @@
+
 import { v4 as uuidv4 } from 'uuid';
 import { 
   Unit, 
@@ -14,34 +15,23 @@ import {
   TEAM_RED, 
   TEAM_BLUE,
   COLOR_RED,
-  COLOR_BLUE
+  COLOR_BLUE,
+  VISION_RANGE
 } from '../constants';
 
-// Utility for Vector math
-const Vec2 = {
-  add: (v1: Vector2, v2: Vector2): Vector2 => ({ x: v1.x + v2.x, y: v1.y + v2.y }),
-  sub: (v1: Vector2, v2: Vector2): Vector2 => ({ x: v1.x - v2.x, y: v1.y - v2.y }),
-  mult: (v: Vector2, n: number): Vector2 => ({ x: v.x * n, y: v.y * n }),
-  div: (v: Vector2, n: number): Vector2 => ({ x: v.x / n, y: v.y / n }),
-  mag: (v: Vector2): number => Math.sqrt(v.x * v.x + v.y * v.y),
-  normalize: (v: Vector2): Vector2 => {
-    const m = Math.sqrt(v.x * v.x + v.y * v.y);
-    return m === 0 ? { x: 0, y: 0 } : { x: v.x / m, y: v.y / m };
-  },
-  dist: (v1: Vector2, v2: Vector2): number => Math.sqrt(Math.pow(v2.x - v1.x, 2) + Math.pow(v2.y - v1.y, 2)),
-  limit: (v: Vector2, max: number): Vector2 => {
-    const mSq = v.x * v.x + v.y * v.y;
-    if (mSq > max * max) {
-      const m = Math.sqrt(mSq);
-      return { x: (v.x / m) * max, y: (v.y / m) * max };
-    }
-    return v;
-  }
-};
+// Performance Tuning
+const GRID_SIZE = 80;
+const GRID_COLS = Math.ceil(CANVAS_WIDTH / GRID_SIZE);
+const GRID_ROWS = Math.ceil(CANVAS_HEIGHT / GRID_SIZE);
+const GRID_CELLS = GRID_COLS * GRID_ROWS;
 
 export class SimulationEngine {
   units: Unit[] = [];
+  unitMap: Map<string, Unit> = new Map(); 
   particles: Particle[] = [];
+  // Particle Pool to reduce GC
+  particlePool: Particle[] = [];
+  
   stats: GameStats = {
     redCount: 0,
     blueCount: 0,
@@ -50,17 +40,29 @@ export class SimulationEngine {
     blueCasualties: 0,
   };
   
-  // Spatial partitioning grid for performance
-  gridSize = 40;
-  grid: Map<string, string[]> = new Map();
+  // Optimized Spatial partitioning grid: 1D array of Unit arrays
+  grid: Unit[][] = [];
+  
+  // Simulation Settings
+  allyOverlapTolerance: number = 0.0;
 
   constructor() {
+    // Pre-allocate grid cells
+    for(let i = 0; i < GRID_CELLS; i++) {
+        this.grid[i] = [];
+    }
     this.reset();
+  }
+  
+  setAllyOverlapTolerance(value: number) {
+      this.allyOverlapTolerance = Math.max(0, Math.min(0.9, value));
   }
 
   reset() {
     this.units = [];
+    this.unitMap.clear();
     this.particles = [];
+    this.particlePool = [];
     this.stats = {
       redCount: 0,
       blueCount: 0,
@@ -68,6 +70,10 @@ export class SimulationEngine {
       redCasualties: 0,
       blueCasualties: 0,
     };
+    
+    for(let i = 0; i < GRID_CELLS; i++) {
+        this.grid[i].length = 0;
+    }
   }
 
   spawnUnit(x: number, y: number, team: string, type: UnitType = UnitType.SOLDIER) {
@@ -84,198 +90,438 @@ export class SimulationEngine {
       radius: stats.radius,
       targetId: null,
       lastAttackTime: 0,
-      state: 'IDLE'
+      lastHitTime: 0,
+      state: 'IDLE',
+      // Stagger AI updates to prevent spikes
+      nextTargetUpdate: Date.now() + Math.random() * 500
     };
     this.units.push(unit);
+    this.unitMap.set(unit.id, unit);
+  }
+
+  // Get a particle from pool or create new
+  private spawnParticle(x: number, y: number, color: string, speed: number, size: number, life: number) {
+      let p: Particle;
+      if (this.particlePool.length > 0) {
+          p = this.particlePool.pop()!;
+          p.position.x = x;
+          p.position.y = y;
+          p.color = color;
+          p.life = life;
+          p.maxLife = life;
+          p.size = size;
+      } else {
+          p = {
+              id: uuidv4(), // ID isn't strictly needed for rendering but kept for type compliance
+              position: { x, y },
+              velocity: { x: 0, y: 0 },
+              life,
+              maxLife: life,
+              color,
+              size
+          };
+      }
+      
+      const angle = Math.random() * Math.PI * 2;
+      p.velocity.x = Math.cos(angle) * speed;
+      p.velocity.y = Math.sin(angle) * speed;
+      
+      this.particles.push(p);
   }
 
   private updateGrid() {
-    this.grid.clear();
-    for (const unit of this.units) {
-      const key = `${Math.floor(unit.position.x / this.gridSize)},${Math.floor(unit.position.y / this.gridSize)}`;
-      if (!this.grid.has(key)) {
-        this.grid.set(key, []);
+    // Fast clear
+    for (let i = 0; i < GRID_CELLS; i++) {
+      this.grid[i].length = 0;
+    }
+
+    // Populate
+    const len = this.units.length;
+    for (let i = 0; i < len; i++) {
+      const u = this.units[i];
+      // Fast floor
+      const cx = (u.position.x / GRID_SIZE) | 0;
+      const cy = (u.position.y / GRID_SIZE) | 0;
+
+      // Bounds check for safety
+      if (cx >= 0 && cx < GRID_COLS && cy >= 0 && cy < GRID_ROWS) {
+        this.grid[cx + cy * GRID_COLS].push(u);
       }
-      this.grid.get(key)?.push(unit.id);
     }
   }
 
-  private getNeighbors(unit: Unit): Unit[] {
-    const neighbors: Unit[] = [];
-    const cellX = Math.floor(unit.position.x / this.gridSize);
-    const cellY = Math.floor(unit.position.y / this.gridSize);
-
-    for (let x = -1; x <= 1; x++) {
-      for (let y = -1; y <= 1; y++) {
-        const key = `${cellX + x},${cellY + y}`;
-        const ids = this.grid.get(key);
-        if (ids) {
-          for (const id of ids) {
-            if (id !== unit.id) {
-              const other = this.units.find(u => u.id === id);
-              if (other) neighbors.push(other);
-            }
-          }
+  private findTarget(unit: Unit): Unit | null {
+    // 1. Check if current target is valid (Quick check)
+    if (unit.targetId) {
+      const currentTarget = this.unitMap.get(unit.targetId);
+      if (currentTarget && currentTarget.health > 0) {
+        const dx = currentTarget.position.x - unit.position.x;
+        const dy = currentTarget.position.y - unit.position.y;
+        const dSq = dx*dx + dy*dy;
+        
+        // Hysteresis: Keep target slightly longer than vision range
+        if (dSq <= (VISION_RANGE * 1.2) ** 2) {
+           return currentTarget;
         }
       }
     }
-    return neighbors;
+
+    // 2. Search for new target (Spatial Grid)
+    const cx = (unit.position.x / GRID_SIZE) | 0;
+    const cy = (unit.position.y / GRID_SIZE) | 0;
+    const searchRad = Math.ceil(VISION_RANGE / GRID_SIZE);
+    
+    let closest: Unit | null = null;
+    let minDSq = Infinity;
+    const visionSq = VISION_RANGE * VISION_RANGE;
+
+    for (let y = -searchRad; y <= searchRad; y++) {
+        for (let x = -searchRad; x <= searchRad; x++) {
+            const nx = cx + x;
+            const ny = cy + y;
+            
+            if (nx >= 0 && nx < GRID_COLS && ny >= 0 && ny < GRID_ROWS) {
+                const cell = this.grid[nx + ny * GRID_COLS];
+                const cellLen = cell.length;
+                // Reverse loop sometimes helps with cache locality if we just added them, but standard is fine
+                for(let i = 0; i < cellLen; i++) {
+                    const other = cell[i];
+                    if (other.team !== unit.team && other.health > 0) {
+                        const dx = other.position.x - unit.position.x;
+                        const dy = other.position.y - unit.position.y;
+                        const dSq = dx*dx + dy*dy;
+                        
+                        if (dSq < minDSq && dSq <= visionSq) {
+                            minDSq = dSq;
+                            closest = other;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    return closest;
+  }
+
+  // Iterative Position Correction (Stable Hard Collisions)
+  private resolveCollisions() {
+      const len = this.units.length;
+      
+      for (let i = 0; i < len; i++) {
+          const unit = this.units[i];
+          const cx = (unit.position.x / GRID_SIZE) | 0;
+          const cy = (unit.position.y / GRID_SIZE) | 0;
+
+          // Check neighbors 3x3
+          for (let yOff = -1; yOff <= 1; yOff++) {
+              for (let xOff = -1; xOff <= 1; xOff++) {
+                  const nx = cx + xOff;
+                  const ny = cy + yOff;
+                  if (nx >= 0 && nx < GRID_COLS && ny >= 0 && ny < GRID_ROWS) {
+                      const cell = this.grid[nx + ny * GRID_COLS];
+                      const cellLen = cell.length;
+                      for (let j = 0; j < cellLen; j++) {
+                          const other = cell[j];
+                          if (other === unit) continue;
+
+                          const dx = unit.position.x - other.position.x;
+                          const dy = unit.position.y - other.position.y;
+                          const distSq = dx*dx + dy*dy;
+                          
+                          let minDist = unit.radius + other.radius;
+                          
+                          // Apply Overlap Tolerance for Allies
+                          if (unit.team === other.team) {
+                              minDist *= (1.0 - this.allyOverlapTolerance);
+                          } else {
+                              // Enemies: Keep a tiny gap to prevent sticking
+                              minDist += 1;
+                          }
+                          
+                          // If overlapping
+                          if (distSq > 0 && distSq < minDist * minDist) {
+                              const dist = Math.sqrt(distSq);
+                              const penetration = minDist - dist;
+                              const moveAmt = penetration * 0.5; // Split move
+                              
+                              const nx = dx / dist;
+                              const ny = dy / dist;
+                              
+                              // Displace Unit
+                              unit.position.x += nx * moveAmt;
+                              unit.position.y += ny * moveAmt;
+                              
+                              // Displace Other
+                              other.position.x -= nx * moveAmt;
+                              other.position.y -= ny * moveAmt;
+                          }
+                      }
+                  }
+              }
+          }
+      }
   }
 
   update(deltaTime: number) {
     this.stats.totalTime += deltaTime;
+    const dt = Math.min(deltaTime, 0.05);
+    const now = Date.now();
+
+    // 1. Logic & Steering Integration (Move Logic)
+    // We update velocity and tentative position here, ignoring collisions for now.
+    const activeLen = this.units.length;
+    for (let i = 0; i < activeLen; i++) {
+        const unit = this.units[i];
+        const stats = UNIT_STATS[unit.type];
+        
+        // --- TARGETING AI (Throttled) ---
+        if (now > unit.nextTargetUpdate) {
+            const t = this.findTarget(unit);
+            unit.targetId = t ? t.id : null;
+            // Update next time between 200ms and 400ms (staggered)
+            unit.nextTargetUpdate = now + 200 + Math.random() * 200;
+        }
+
+        // --- STEERING FORCES ---
+        let seekX = 0;
+        let seekY = 0;
+        let target: Unit | undefined;
+
+        if (unit.targetId) {
+             target = this.unitMap.get(unit.targetId);
+             if (!target) unit.targetId = null;
+        }
+
+        if (target) {
+            const dx = target.position.x - unit.position.x;
+            const dy = target.position.y - unit.position.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            const attackRange = stats.range + unit.radius + target.radius;
+
+            if (dist <= attackRange) {
+                // ATTACKING
+                unit.state = 'ATTACKING';
+                // Stop moving
+                unit.velocity.x *= 0.8;
+                unit.velocity.y *= 0.8;
+                
+                if (now - unit.lastAttackTime > stats.attackSpeed) {
+                    target.health -= stats.damage;
+                    target.lastHitTime = now;
+                    unit.lastAttackTime = now;
+                    // Spark effect
+                    this.spawnParticle(
+                        unit.position.x + (dx/dist)*unit.radius, 
+                        unit.position.y + (dy/dist)*unit.radius,
+                        '#ffffff', 100, 2, 0.2
+                    );
+                }
+            } else {
+                // CHASING
+                unit.state = 'MOVING';
+                seekX = (dx / dist) * (stats.speed * 60);
+                seekY = (dy / dist) * (stats.speed * 60);
+            }
+        } else {
+            // MARCHING
+            unit.state = 'MOVING';
+            const targetX = unit.team === TEAM_RED ? CANVAS_WIDTH - 50 : 50;
+            const targetY = unit.position.y * 0.95 + (CANVAS_HEIGHT/2) * 0.05; // Gently steer to center Y
+            const dx = targetX - unit.position.x;
+            const dy = targetY - unit.position.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            
+            if (dist > 50) {
+                seekX = (dx / dist) * (stats.speed * 40);
+                seekY = (dy / dist) * (stats.speed * 40);
+            } else {
+                unit.state = 'IDLE';
+                unit.velocity.x *= 0.9;
+                unit.velocity.y *= 0.9;
+            }
+        }
+        
+        // --- FLOCKING (Alignment & Cohesion) ---
+        // Only apply when moving to simulate formation
+        if (unit.state === 'MOVING') {
+            let neighborCount = 0;
+            let alignX = 0, alignY = 0;
+            let cohereX = 0, cohereY = 0;
+            
+            const cx = (unit.position.x / GRID_SIZE) | 0;
+            const cy = (unit.position.y / GRID_SIZE) | 0;
+            const flockRangeSq = (unit.radius * 6) ** 2; // Perception radius
+
+            // Check grid neighbors (using grid from previous frame, which is fine)
+            for (let yOff = -1; yOff <= 1; yOff++) {
+                for (let xOff = -1; xOff <= 1; xOff++) {
+                    const nx = cx + xOff;
+                    const ny = cy + yOff;
+                    if (nx >= 0 && nx < GRID_COLS && ny >= 0 && ny < GRID_ROWS) {
+                        const cell = this.grid[nx + ny * GRID_COLS];
+                        const cellLen = cell.length;
+                        for(let j=0; j<cellLen; j++) {
+                            const other = cell[j];
+                            if (other === unit) continue;
+                            
+                            // Only flock with teammates
+                            if (other.team === unit.team) {
+                                const dx = other.position.x - unit.position.x;
+                                const dy = other.position.y - unit.position.y;
+                                const dSq = dx*dx + dy*dy;
+
+                                if (dSq < flockRangeSq) {
+                                    // Alignment: match velocity
+                                    alignX += other.velocity.x;
+                                    alignY += other.velocity.y;
+                                    
+                                    // Cohesion: steer to center
+                                    cohereX += other.position.x;
+                                    cohereY += other.position.y;
+                                    
+                                    neighborCount++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if (neighborCount > 0) {
+                // Alignment Force
+                alignX /= neighborCount;
+                alignY /= neighborCount;
+                const alignMag = Math.sqrt(alignX*alignX + alignY*alignY);
+                if (alignMag > 0) {
+                    // Weight: 20.0 (Keep moving in same direction)
+                    seekX += (alignX / alignMag) * (stats.speed * 20.0);
+                    seekY += (alignY / alignMag) * (stats.speed * 20.0);
+                }
+                
+                // Cohesion Force
+                cohereX /= neighborCount;
+                cohereY /= neighborCount;
+                // Vector to center of mass
+                let cohereDirX = cohereX - unit.position.x;
+                let cohereDirY = cohereY - unit.position.y;
+                const cohereMag = Math.sqrt(cohereDirX*cohereDirX + cohereDirY*cohereDirY);
+                if (cohereMag > 0) {
+                    // Weight: 10.0 (Gentle grouping)
+                    seekX += (cohereDirX / cohereMag) * (stats.speed * 10.0);
+                    seekY += (cohereDirY / cohereMag) * (stats.speed * 10.0);
+                }
+            }
+        }
+
+        // Boundary Avoidance (Soft push)
+        let boundX = 0;
+        let boundY = 0;
+        const margin = 40;
+        if (unit.position.x < margin) boundX = 150;
+        else if (unit.position.x > CANVAS_WIDTH - margin) boundX = -150;
+        if (unit.position.y < margin) boundY = 150;
+        else if (unit.position.y > CANVAS_HEIGHT - margin) boundY = -150;
+
+        // Apply Forces
+        if (unit.state === 'MOVING' || unit.state === 'IDLE') {
+             // acceleration = forces
+             unit.acceleration.x = seekX + boundX;
+             unit.acceleration.y = seekY + boundY;
+
+             // velocity += acceleration * dt
+             unit.velocity.x += unit.acceleration.x * dt;
+             unit.velocity.y += unit.acceleration.y * dt;
+
+             // Speed Limit
+             const maxSpeed = stats.speed * 60;
+             const vSq = unit.velocity.x * unit.velocity.x + unit.velocity.y * unit.velocity.y;
+             if (vSq > maxSpeed * maxSpeed) {
+                 const vMag = Math.sqrt(vSq);
+                 unit.velocity.x = (unit.velocity.x / vMag) * maxSpeed;
+                 unit.velocity.y = (unit.velocity.y / vMag) * maxSpeed;
+             }
+        }
+
+        // Apply Velocity to Position (Integration)
+        unit.position.x += unit.velocity.x * dt;
+        unit.position.y += unit.velocity.y * dt;
+
+        // Hard Screen Clamp
+        if(unit.position.x < unit.radius) unit.position.x = unit.radius;
+        if(unit.position.x > CANVAS_WIDTH - unit.radius) unit.position.x = CANVAS_WIDTH - unit.radius;
+        if(unit.position.y < unit.radius) unit.position.y = unit.radius;
+        if(unit.position.y > CANVAS_HEIGHT - unit.radius) unit.position.y = CANVAS_HEIGHT - unit.radius;
+    }
+
+    // 2. Spatial Partitioning Update
+    // We update the grid with the new tentative positions
     this.updateGrid();
 
-    // Remove dead units
-    const aliveUnits = this.units.filter(u => u.health > 0);
-    const deadUnits = this.units.filter(u => u.health <= 0);
+    // 3. Collision Resolution (Iterative Solver)
+    // Run multiple passes to stabilize the stack of units
+    const SOLVER_ITERATIONS = 2; 
+    for(let k=0; k<SOLVER_ITERATIONS; k++) {
+        this.resolveCollisions();
+    }
+
+    // 4. Lifecycle & Clean up
+    let writeIdx = 0;
+    let rCount = 0;
+    let bCount = 0;
+    const initialLen = this.units.length;
     
-    deadUnits.forEach(u => {
-      if (u.team === TEAM_RED) this.stats.redCasualties++;
-      else this.stats.blueCasualties++;
-      
-      // Spawn death particles
-      for(let i=0; i<5; i++) {
-        this.particles.push({
-          id: uuidv4(),
-          position: { ...u.position },
-          velocity: { x: (Math.random() - 0.5) * 2, y: (Math.random() - 0.5) * 2 },
-          life: 1.0,
-          maxLife: 1.0,
-          color: u.team === TEAM_RED ? COLOR_RED : COLOR_BLUE,
-          size: Math.random() * 3 + 1
-        });
-      }
-    });
-
-    this.units = aliveUnits;
-    this.stats.redCount = this.units.filter(u => u.team === TEAM_RED).length;
-    this.stats.blueCount = this.units.filter(u => u.team === TEAM_BLUE).length;
-
-    // Update Units
-    for (const unit of this.units) {
-      const stats = UNIT_STATS[unit.type];
-      const neighbors = this.getNeighbors(unit);
-      
-      // AI Logic: Find Target
-      let target: Unit | undefined;
-      let minDist = Infinity;
-      
-      // Simple scan for nearest enemy (optimization: only scan neighbors + extended radius or check all if count is low)
-      // For performance with many units, this should be optimized. 
-      // Current: Check all enemies.
-      const enemies = this.units.filter(u => u.team !== unit.team);
-      for (const enemy of enemies) {
-        const d = Vec2.dist(unit.position, enemy.position);
-        if (d < minDist) {
-          minDist = d;
-          target = enemy;
-        }
-      }
-
-      // Forces
-      let separation = { x: 0, y: 0 };
-      let seek = { x: 0, y: 0 };
-      let boundary = { x: 0, y: 0 };
-
-      // 1. Separation (Avoid crowding)
-      let separationCount = 0;
-      for (const other of neighbors) {
-        const d = Vec2.dist(unit.position, other.position);
-        if (d > 0 && d < unit.radius + other.radius + 5) {
-          const diff = Vec2.sub(unit.position, other.position);
-          const weight = Vec2.normalize(diff);
-          const invDist = Vec2.div(weight, d); // Weight by inverse distance
-          separation = Vec2.add(separation, invDist);
-          separationCount++;
-        }
-      }
-      if (separationCount > 0) {
-        separation = Vec2.div(separation, separationCount);
-        separation = Vec2.normalize(separation);
-        separation = Vec2.mult(separation, stats.speed * 2); // High priority
-      }
-
-      // 2. Seek (Move to target)
-      if (target) {
-        const d = Vec2.dist(unit.position, target.position);
-        const attackRange = stats.range;
-        
-        if (d <= attackRange + target.radius + unit.radius) {
-          // In range, stop moving and attack
-          unit.velocity = Vec2.mult(unit.velocity, 0.5); // Friction
-          
-          if (Date.now() - unit.lastAttackTime > stats.attackSpeed) {
-            target.health -= stats.damage;
-            unit.lastAttackTime = Date.now();
-            unit.state = 'ATTACKING';
-            
-            // Visual feedback
-            this.particles.push({
-              id: uuidv4(),
-              position: Vec2.add(unit.position, Vec2.mult(Vec2.normalize(Vec2.sub(target.position, unit.position)), unit.radius)),
-              velocity: Vec2.mult(Vec2.normalize(Vec2.sub(target.position, unit.position)), 2),
-              life: 0.3,
-              maxLife: 0.3,
-              color: '#ffffff',
-              size: 2
-            });
-          }
+    for(let i = 0; i < initialLen; i++) {
+        const unit = this.units[i];
+        if(unit.health > 0) {
+            // Keep unit
+            if (i !== writeIdx) {
+                this.units[writeIdx] = unit;
+            }
+            if(unit.team === TEAM_RED) rCount++; else bCount++;
+            writeIdx++;
         } else {
-          // Move towards target
-          unit.state = 'MOVING';
-          const desired = Vec2.sub(target.position, unit.position);
-          seek = Vec2.normalize(desired);
-          seek = Vec2.mult(seek, stats.speed);
+            // Death Logic
+            if (unit.team === TEAM_RED) this.stats.redCasualties++;
+            else this.stats.blueCasualties++;
+            this.unitMap.delete(unit.id);
+            
+            // Death Particles
+            for(let j=0; j<5; j++) {
+                this.spawnParticle(
+                    unit.position.x, unit.position.y,
+                    unit.team === TEAM_RED ? COLOR_RED : COLOR_BLUE,
+                    Math.random() * 100 + 50,
+                    Math.random() * 3 + 2,
+                    0.6
+                );
+            }
         }
-      } else {
-        unit.state = 'IDLE';
-        unit.velocity = Vec2.mult(unit.velocity, 0.9); // Stop if no target
-      }
-
-      // 3. Boundary Avoidance
-      const margin = 50;
-      if (unit.position.x < margin) boundary.x = 1;
-      if (unit.position.x > CANVAS_WIDTH - margin) boundary.x = -1;
-      if (unit.position.y < margin) boundary.y = 1;
-      if (unit.position.y > CANVAS_HEIGHT - margin) boundary.y = -1;
-      boundary = Vec2.mult(boundary, stats.speed * 3);
-
-      // Apply Forces
-      if (unit.state === 'MOVING') {
-        let steer = { x: 0, y: 0 };
-        steer = Vec2.add(steer, Vec2.mult(seek, 1.0));
-        steer = Vec2.add(steer, Vec2.mult(separation, 1.5));
-        steer = Vec2.add(steer, boundary);
-
-        // Apply steering to velocity
-        unit.acceleration = steer; // Simplified: force directly affects velocity for snappier movement
-        unit.velocity = Vec2.add(unit.velocity, unit.acceleration);
-        unit.velocity = Vec2.limit(unit.velocity, stats.speed);
-        
-        // Update Position
-        unit.position = Vec2.add(unit.position, unit.velocity);
-      } else if (unit.state === 'ATTACKING' || unit.state === 'IDLE') {
-        // Still apply separation even when attacking to avoid stacking
-         if (separationCount > 0) {
-            unit.position = Vec2.add(unit.position, Vec2.mult(separation, 0.5));
-         }
-      }
-
-      // Hard clamp to bounds
-      unit.position.x = Math.max(unit.radius, Math.min(CANVAS_WIDTH - unit.radius, unit.position.x));
-      unit.position.y = Math.max(unit.radius, Math.min(CANVAS_HEIGHT - unit.radius, unit.position.y));
     }
+    this.units.length = writeIdx;
+    this.stats.redCount = rCount;
+    this.stats.blueCount = bCount;
 
-    // Update Particles
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      const p = this.particles[i];
-      p.life -= deltaTime;
-      p.position = Vec2.add(p.position, p.velocity);
-      if (p.life <= 0) {
-        this.particles.splice(i, 1);
-      }
+    // 5. Update Particles
+    let pWriteIdx = 0;
+    const pLen = this.particles.length;
+    for(let i=0; i<pLen; i++) {
+        const p = this.particles[i];
+        p.life -= dt;
+        if(p.life > 0) {
+            p.position.x += p.velocity.x * dt;
+            p.position.y += p.velocity.y * dt;
+            
+            if (i !== pWriteIdx) {
+                this.particles[pWriteIdx] = p;
+            }
+            pWriteIdx++;
+        } else {
+            // Recycle
+            this.particlePool.push(p);
+        }
     }
+    this.particles.length = pWriteIdx;
   }
 
   getState(): SimulationState {

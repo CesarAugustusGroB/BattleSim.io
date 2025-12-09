@@ -1,3 +1,4 @@
+
 import { UnitType } from './constants';
 
 export interface Vector2 {
@@ -17,7 +18,9 @@ export interface Unit {
   radius: number;
   targetId: string | null;
   lastAttackTime: number;
+  lastHitTime: number;
   state: 'IDLE' | 'MOVING' | 'ATTACKING';
+  nextTargetUpdate: number;
 }
 
 export interface Particle {

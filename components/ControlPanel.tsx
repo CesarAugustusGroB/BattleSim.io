@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { UnitType, TEAM_RED, TEAM_BLUE } from '../constants';
 
@@ -6,9 +7,22 @@ interface ControlPanelProps {
   onReset: () => void;
   onPauseToggle: () => void;
   isPaused: boolean;
+  allyOverlapTolerance: number;
+  onOverlapToleranceChange: (val: number) => void;
+  onToggleAdvisor: () => void;
+  isAdvisorOpen: boolean;
 }
 
-const ControlPanel: React.FC<ControlPanelProps> = ({ onSpawn, onReset, onPauseToggle, isPaused }) => {
+const ControlPanel: React.FC<ControlPanelProps> = ({ 
+    onSpawn, 
+    onReset, 
+    onPauseToggle, 
+    isPaused,
+    allyOverlapTolerance,
+    onOverlapToleranceChange,
+    onToggleAdvisor,
+    isAdvisorOpen
+}) => {
   return (
     <div className="bg-neutral-900 border-l border-neutral-800 p-6 flex flex-col h-full gap-6 w-80 overflow-y-auto">
       <div className="space-y-2">
@@ -76,7 +90,43 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onSpawn, onReset, onPauseTo
         </div>
       </div>
 
+      <div className="space-y-4">
+        <h3 className="text-neutral-400 text-xs font-bold uppercase tracking-wider">Simulation Settings</h3>
+        
+        {/* Ally Overlap Slider */}
+        <div className="space-y-2 bg-neutral-800 p-3 rounded-lg border border-neutral-700">
+            <div className="flex justify-between text-xs text-gray-300 font-medium">
+                <span>Ally Overlap Tolerance</span>
+                <span className="text-blue-400">{(allyOverlapTolerance * 100).toFixed(0)}%</span>
+            </div>
+            <input
+                type="range"
+                min="0"
+                max="0.9"
+                step="0.05"
+                value={allyOverlapTolerance}
+                onChange={(e) => onOverlapToleranceChange(parseFloat(e.target.value))}
+                className="w-full h-2 bg-neutral-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+            />
+            <div className="flex justify-between text-[10px] text-gray-500">
+                <span>Hard Collisions</span>
+                <span>Swarm</span>
+            </div>
+        </div>
+      </div>
+
       <div className="mt-auto space-y-3">
+         <button 
+          onClick={onToggleAdvisor}
+          className={`w-full py-2 rounded-lg font-medium text-sm transition-all border ${
+            isAdvisorOpen
+              ? 'bg-blue-900/50 border-blue-500/50 text-blue-200' 
+              : 'bg-neutral-800 hover:bg-neutral-700 border-neutral-600 text-neutral-300'
+          }`}
+        >
+          {isAdvisorOpen ? 'Close Battle Advisor' : '✨ Open Battle Advisor'}
+        </button>
+
         <button 
           onClick={onPauseToggle}
           className={`w-full py-3 rounded-lg font-bold text-lg transition-all ${

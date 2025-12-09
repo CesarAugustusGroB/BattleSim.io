@@ -1,3 +1,4 @@
+
 export const CANVAS_WIDTH = 1200;
 export const CANVAS_HEIGHT = 800;
 
@@ -6,14 +7,14 @@ export const TEAM_BLUE = 'BLUE';
 
 export const UNIT_RADIUS = 8;
 export const ATTACK_RANGE = 25; // Melee range
-export const VISION_RANGE = 300;
+export const VISION_RANGE = 500; // Increased vision range
 
 // Colors
 export const COLOR_RED = '#ef4444';
 export const COLOR_RED_DARK = '#991b1b';
 export const COLOR_BLUE = '#3b82f6';
 export const COLOR_BLUE_DARK = '#1e3a8a';
-export const COLOR_GROUND = '#262626';
+export const COLOR_GROUND = '#171717';
 export const COLOR_OBSTACLE = '#525252';
 
 export enum UnitType {
@@ -25,29 +26,29 @@ export enum UnitType {
 export const UNIT_STATS = {
   [UnitType.SOLDIER]: {
     maxHealth: 100,
-    damage: 10,
-    attackSpeed: 1000, // ms per attack
-    speed: 1.5,
-    radius: 8,
-    range: 25,
+    damage: 12,
+    attackSpeed: 800, // ms per attack
+    speed: 2.0,
+    radius: 10,
+    range: 30,
     color: '#ffffff'
   },
   [UnitType.TANK]: {
-    maxHealth: 300,
-    damage: 25,
-    attackSpeed: 2000,
+    maxHealth: 400,
+    damage: 30,
+    attackSpeed: 1800,
     speed: 0.8,
-    radius: 14,
-    range: 35,
+    radius: 18,
+    range: 40,
     color: '#d4d4d8'
   },
   [UnitType.ARCHER]: {
     maxHealth: 60,
     damage: 15,
-    attackSpeed: 800,
-    speed: 1.2,
-    radius: 7,
-    range: 150,
+    attackSpeed: 1000,
+    speed: 1.5,
+    radius: 9,
+    range: 180,
     color: '#a1a1aa'
   }
 };
