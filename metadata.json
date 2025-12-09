@@ -1,0 +1,5 @@
+{
+  "name": "BattleSim.io",
+  "description": "A high-performance 2D army simulation engine using steering behaviors and spatial partitioning for realistic battles.",
+  "requestFramePermissions": []
+}
