@@ -1,6 +1,5 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { GoogleGenAI } from "@google/genai";
 import { GameStats } from '../types';
 import { UNIT_STATS } from '../constants';
 import { SimulationEngine } from '../services/simulation';
@@ -36,13 +35,13 @@ const BattleAdvisor: React.FC<BattleAdvisorProps> = ({ isOpen, onClose, stats, e
   const getGameStateSummary = () => {
     // Generate snapshot on demand to avoid React overhead
     const units = engine.getSnapshot();
-    
+
     const redUnits = units.filter(u => u.team === 'RED');
     const blueUnits = units.filter(u => u.team === 'BLUE');
-    
+
     const redTypes = redUnits.reduce((acc, u) => { acc[u.type] = (acc[u.type] || 0) + 1; return acc; }, {} as Record<string, number>);
     const blueTypes = blueUnits.reduce((acc, u) => { acc[u.type] = (acc[u.type] || 0) + 1; return acc; }, {} as Record<string, number>);
-    
+
     const redHealth = redUnits.reduce((sum, u) => sum + u.health, 0) / (redUnits.length || 1);
     const blueHealth = blueUnits.reduce((sum, u) => sum + u.health, 0) / (blueUnits.length || 1);
 
@@ -63,38 +62,14 @@ const BattleAdvisor: React.FC<BattleAdvisorProps> = ({ isOpen, onClose, stats, e
     setIsThinking(true);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const context = getGameStateSummary();
-      
-      const systemPrompt = `
-        You are an expert military strategist AI analyzing a real-time 2D army simulation.
-        Your goal is to provide deep strategic insight, predict outcomes, and explain battlefield dynamics.
-        
-        CURRENT BATTLEFIELD STATE:
-        ${context}
-        
-        Analyze the forces, composition (Tanks are distinct from Soldiers and Archers), and momentum.
-        If asked for advice, give specific tactical suggestions based on the unit stats.
-        Soldiers are melee swarming units. Tanks are durable heavy hitters. Archers are ranged but fragile.
-      `;
+      // Mock AI response for now since dependency was removed
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const text = "Strategic analysis modules are currently offline. (Dependency @google/genai removed)";
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
-        contents: [
-            { role: 'user', parts: [{ text: `Context: ${context}\n\nQuestion: ${userMessage}` }] }
-        ],
-        config: {
-          systemInstruction: systemPrompt,
-          thinkingConfig: { thinkingBudget: 32768 },
-        }
-      });
-
-      const text = response.text || "I'm analyzing the battlefield but cannot formulate a response right now.";
-      
       setMessages(prev => [...prev, { role: 'model', text }]);
     } catch (error) {
       console.error("AI Error:", error);
-      setMessages(prev => [...prev, { role: 'model', text: "Communications disrupted. I cannot reach the strategic command server." }]);
+      setMessages(prev => [...prev, { role: 'model', text: "Communications disrupted." }]);
     } finally {
       setIsThinking(false);
     }
@@ -114,7 +89,7 @@ const BattleAdvisor: React.FC<BattleAdvisorProps> = ({ isOpen, onClose, stats, e
           <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
           <span className="font-bold text-sm text-neutral-200">Gemini Strategic Advisor</span>
         </div>
-        <button 
+        <button
           onClick={onClose}
           className="text-neutral-400 hover:text-white transition-colors"
         >
@@ -122,24 +97,23 @@ const BattleAdvisor: React.FC<BattleAdvisorProps> = ({ isOpen, onClose, stats, e
         </button>
       </div>
 
-      <div 
+      <div
         ref={scrollRef}
         className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin bg-neutral-950/50"
       >
         {messages.map((msg, idx) => (
           <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div 
-              className={`max-w-[85%] rounded-lg p-3 text-sm ${
-                msg.role === 'user' 
-                  ? 'bg-blue-600/20 text-blue-100 border border-blue-600/30' 
-                  : 'bg-neutral-800 text-neutral-200 border border-neutral-700'
-              }`}
+            <div
+              className={`max-w-[85%] rounded-lg p-3 text-sm ${msg.role === 'user'
+                ? 'bg-blue-600/20 text-blue-100 border border-blue-600/30'
+                : 'bg-neutral-800 text-neutral-200 border border-neutral-700'
+                }`}
             >
               {msg.text}
             </div>
           </div>
         ))}
-        
+
         {isThinking && (
           <div className="flex justify-start">
             <div className="bg-neutral-800 rounded-lg p-3 text-sm border border-neutral-700 flex items-center gap-2">
@@ -174,7 +148,7 @@ const BattleAdvisor: React.FC<BattleAdvisorProps> = ({ isOpen, onClose, stats, e
           </button>
         </div>
         <div className="mt-2 text-[10px] text-neutral-500 text-center">
-            Powered by gemini-3-pro-preview
+          Powered by gemini-3-pro-preview
         </div>
       </div>
     </div>
