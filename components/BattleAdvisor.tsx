@@ -1,13 +1,15 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI } from "@google/genai";
-import { GameStats, Unit } from '../types';
+import { GameStats } from '../types';
 import { UNIT_STATS } from '../constants';
+import { SimulationEngine } from '../services/simulation';
 
 interface BattleAdvisorProps {
   isOpen: boolean;
   onClose: () => void;
   stats: GameStats;
-  units: Unit[];
+  engine: SimulationEngine;
 }
 
 interface Message {
@@ -15,7 +17,7 @@ interface Message {
   text: string;
 }
 
-const BattleAdvisor: React.FC<BattleAdvisorProps> = ({ isOpen, onClose, stats, units }) => {
+const BattleAdvisor: React.FC<BattleAdvisorProps> = ({ isOpen, onClose, stats, engine }) => {
   const [messages, setMessages] = useState<Message[]>([
     { role: 'model', text: 'I am your Strategic Battle Advisor. The battlefield is evolving. What are your orders or questions?' }
   ]);
@@ -32,7 +34,9 @@ const BattleAdvisor: React.FC<BattleAdvisorProps> = ({ isOpen, onClose, stats, u
   if (!isOpen) return null;
 
   const getGameStateSummary = () => {
-    // Analyze current state for the prompt
+    // Generate snapshot on demand to avoid React overhead
+    const units = engine.getSnapshot();
+    
     const redUnits = units.filter(u => u.team === 'RED');
     const blueUnits = units.filter(u => u.team === 'BLUE');
     
@@ -81,7 +85,7 @@ const BattleAdvisor: React.FC<BattleAdvisorProps> = ({ isOpen, onClose, stats, u
         ],
         config: {
           systemInstruction: systemPrompt,
-          thinkingConfig: { thinkingBudget: 32768 }, // High thinking budget for complex strategy
+          thinkingConfig: { thinkingBudget: 32768 },
         }
       });
 
@@ -105,7 +109,6 @@ const BattleAdvisor: React.FC<BattleAdvisorProps> = ({ isOpen, onClose, stats, u
 
   return (
     <div className="fixed bottom-4 right-4 w-96 h-[500px] bg-neutral-900 border border-neutral-700 rounded-xl shadow-2xl flex flex-col overflow-hidden z-50 animate-in slide-in-from-bottom-10 fade-in duration-300">
-      {/* Header */}
       <div className="bg-neutral-800 p-3 flex justify-between items-center border-b border-neutral-700">
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
@@ -119,7 +122,6 @@ const BattleAdvisor: React.FC<BattleAdvisorProps> = ({ isOpen, onClose, stats, u
         </button>
       </div>
 
-      {/* Chat Area */}
       <div 
         ref={scrollRef}
         className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin bg-neutral-950/50"
@@ -152,7 +154,6 @@ const BattleAdvisor: React.FC<BattleAdvisorProps> = ({ isOpen, onClose, stats, u
         )}
       </div>
 
-      {/* Input Area */}
       <div className="p-3 bg-neutral-900 border-t border-neutral-800">
         <div className="flex gap-2">
           <input

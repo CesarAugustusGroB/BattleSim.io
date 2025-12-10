@@ -6,21 +6,17 @@ export interface Vector2 {
   y: number;
 }
 
-export interface Unit {
-  id: string;
+// Data-Oriented View of a Unit (for React/UI consumption only)
+export interface UnitView {
+  id: number;
   type: UnitType;
   team: string;
-  position: Vector2;
-  velocity: Vector2;
-  acceleration: Vector2;
+  x: number;
+  y: number;
   health: number;
   maxHealth: number;
   radius: number;
-  targetId: string | null;
-  lastAttackTime: number;
-  lastHitTime: number;
-  state: 'IDLE' | 'MOVING' | 'ATTACKING';
-  nextTargetUpdate: number;
+  state: string;
 }
 
 export interface Particle {
@@ -42,7 +38,8 @@ export interface GameStats {
 }
 
 export interface SimulationState {
-  units: Unit[];
+  // We no longer expose raw Unit objects here for rendering.
+  // Rendering reads directly from ECS arrays.
   particles: Particle[];
   stats: GameStats;
   isRunning: boolean;

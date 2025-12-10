@@ -5,6 +5,18 @@ export const CANVAS_HEIGHT = 800;
 export const TEAM_RED = 'RED';
 export const TEAM_BLUE = 'BLUE';
 
+// ECS Numeric Mappings
+export const TEAM_ID_RED = 0;
+export const TEAM_ID_BLUE = 1;
+
+export const STATE_IDLE = 0;
+export const STATE_MOVING = 1;
+export const STATE_ATTACKING = 2;
+
+export const TYPE_ID_SOLDIER = 0;
+export const TYPE_ID_TANK = 1;
+export const TYPE_ID_ARCHER = 2;
+
 export const UNIT_RADIUS = 8;
 export const ATTACK_RANGE = 25; // Melee range
 export const VISION_RANGE = 500; // Increased vision range
@@ -25,6 +37,7 @@ export enum UnitType {
 
 export const UNIT_STATS = {
   [UnitType.SOLDIER]: {
+    typeId: TYPE_ID_SOLDIER,
     maxHealth: 100,
     damage: 12,
     attackSpeed: 800, // ms per attack
@@ -34,6 +47,7 @@ export const UNIT_STATS = {
     color: '#ffffff'
   },
   [UnitType.TANK]: {
+    typeId: TYPE_ID_TANK,
     maxHealth: 400,
     damage: 30,
     attackSpeed: 1800,
@@ -43,6 +57,7 @@ export const UNIT_STATS = {
     color: '#d4d4d8'
   },
   [UnitType.ARCHER]: {
+    typeId: TYPE_ID_ARCHER,
     maxHealth: 60,
     damage: 15,
     attackSpeed: 1000,

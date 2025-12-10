@@ -1,11 +1,9 @@
 
-import { v4 as uuidv4 } from 'uuid';
+import * as BitecsNamespace from 'bitecs';
 import { 
-  Unit, 
-  Vector2, 
-  SimulationState, 
   Particle,
-  GameStats
+  GameStats,
+  UnitView
 } from '../types';
 import { 
   CANVAS_WIDTH, 
@@ -14,10 +12,76 @@ import {
   UnitType, 
   TEAM_RED, 
   TEAM_BLUE,
-  COLOR_RED,
+  COLOR_RED, 
   COLOR_BLUE,
-  VISION_RANGE
+  VISION_RANGE,
+  TEAM_ID_RED,
+  TEAM_ID_BLUE,
+  STATE_IDLE,
+  STATE_MOVING,
+  STATE_ATTACKING,
+  TYPE_ID_SOLDIER,
+  TYPE_ID_TANK,
+  TYPE_ID_ARCHER
 } from '../constants';
+
+// --- ECS Setup & Safety Layer ---
+let createWorld: any, addEntity: any, removeEntity: any, defineComponent: any, defineQuery: any;
+let Types: any = {};
+let f32 = 'f32', ui8 = 'ui8', eid = 'eid';
+
+try {
+    // Robust unwrapping for ESM/CJS interop
+    const bitecs: any = (BitecsNamespace as any).default || BitecsNamespace;
+    
+    if (bitecs) {
+        createWorld = bitecs.createWorld;
+        addEntity = bitecs.addEntity;
+        removeEntity = bitecs.removeEntity;
+        defineComponent = bitecs.defineComponent;
+        defineQuery = bitecs.defineQuery;
+        Types = bitecs.Types || bitecs; // fallback for older versions
+        
+        if (Types) {
+            f32 = Types.f32 || 'f32';
+            ui8 = Types.ui8 || 'ui8';
+            eid = Types.eid || 'eid';
+        }
+    }
+} catch (e) {
+    console.error("Critical: Failed to initialize bitECS module", e);
+}
+
+// Dummy factory if load failed to prevent top-level crash
+const safeDefine = (schema: any) => defineComponent ? defineComponent(schema) : {};
+const safeQuery = (comps: any[]) => defineQuery ? defineQuery(comps) : () => [];
+
+// --- Components ---
+const Vector2 = { x: f32, y: f32 };
+
+export const Position = safeDefine(Vector2);
+export const Velocity = safeDefine(Vector2);
+export const Force = safeDefine(Vector2);
+
+export const UnitComponent = safeDefine({
+   team: ui8,     // 0 or 1
+   type: ui8,     // 0, 1, 2
+   health: f32,
+   maxHealth: f32,
+   radius: f32,
+   range: f32,
+   damage: f32,
+   attackSpeed: f32,
+   speed: f32,
+   state: ui8,
+   targetId: eid,
+   lastAttackTime: f32,
+   lastHitTime: f32,
+   nextTargetUpdate: f32
+});
+
+// Queries
+export const unitQuery = safeQuery([Position, Velocity, UnitComponent]);
 
 // Performance Tuning
 const GRID_SIZE = 80;
@@ -26,10 +90,9 @@ const GRID_ROWS = Math.ceil(CANVAS_HEIGHT / GRID_SIZE);
 const GRID_CELLS = GRID_COLS * GRID_ROWS;
 
 export class SimulationEngine {
-  units: Unit[] = [];
-  unitMap: Map<string, Unit> = new Map(); 
+  world: any;
+  
   particles: Particle[] = [];
-  // Particle Pool to reduce GC
   particlePool: Particle[] = [];
   
   stats: GameStats = {
@@ -40,27 +103,78 @@ export class SimulationEngine {
     blueCasualties: 0,
   };
   
-  // Optimized Spatial partitioning grid: 1D array of Unit arrays
-  grid: Unit[][] = [];
+  // Spatial partitioning: 1D array of array of Entity IDs
+  grid: number[][] = [];
   
-  // Simulation Settings
+  // Flow Fields
+  redFlowField: Float32Array;
+  blueFlowField: Float32Array;
+  
   allyOverlapTolerance: number = 0.0;
 
   constructor() {
+    if (!createWorld) {
+        console.error("ECS Engine dependencies missing. Simulation will not run.");
+        return;
+    }
+
+    this.world = createWorld();
+    
     // Pre-allocate grid cells
     for(let i = 0; i < GRID_CELLS; i++) {
         this.grid[i] = [];
     }
-    this.reset();
+    
+    const flowCols = Math.ceil(CANVAS_WIDTH / 40);
+    const flowRows = Math.ceil(CANVAS_HEIGHT / 40);
+    const flowSize = flowCols * flowRows * 2;
+    this.redFlowField = new Float32Array(flowSize);
+    this.blueFlowField = new Float32Array(flowSize);
+    
+    this.generateFlowFields(flowCols, flowRows);
   }
   
+  private generateFlowFields(cols: number, rows: number) {
+      for(let y = 0; y < rows; y++) {
+          for(let x = 0; x < cols; x++) {
+              const idx = (x + y * cols) * 2;
+              const px = x * 40 + 20;
+              const py = y * 40 + 20;
+              const centerY = CANVAS_HEIGHT / 2;
+              const dy = centerY - py;
+
+              // RED TEAM (Go Right)
+              let rx = 1.0;
+              let ry = dy * 0.002;
+              if (py < 100) ry += 0.5;
+              if (py > CANVAS_HEIGHT - 100) ry -= 0.5;
+              const rLen = Math.sqrt(rx*rx + ry*ry);
+              this.redFlowField[idx] = rx / rLen;
+              this.redFlowField[idx+1] = ry / rLen;
+
+              // BLUE TEAM (Go Left)
+              let bx = -1.0;
+              let by = dy * 0.002;
+              if (py < 100) by += 0.5;
+              if (py > CANVAS_HEIGHT - 100) by -= 0.5;
+              const bLen = Math.sqrt(bx*bx + by*by);
+              this.blueFlowField[idx] = bx / bLen;
+              this.blueFlowField[idx+1] = by / bLen;
+          }
+      }
+  }
+
   setAllyOverlapTolerance(value: number) {
       this.allyOverlapTolerance = Math.max(0, Math.min(0.9, value));
   }
 
   reset() {
-    this.units = [];
-    this.unitMap.clear();
+    if (!this.world) return;
+    const ents = unitQuery(this.world);
+    for (let i = 0; i < ents.length; i++) {
+        removeEntity(this.world, ents[i]);
+    }
+    
     this.particles = [];
     this.particlePool = [];
     this.stats = {
@@ -76,30 +190,38 @@ export class SimulationEngine {
     }
   }
 
-  spawnUnit(x: number, y: number, team: string, type: UnitType = UnitType.SOLDIER) {
+  spawnUnit(x: number, y: number, teamStr: string, type: UnitType = UnitType.SOLDIER) {
+    if (!this.world) return;
+    const eid = addEntity(this.world);
     const stats = UNIT_STATS[type];
-    const unit: Unit = {
-      id: uuidv4(),
-      type,
-      team,
-      position: { x, y },
-      velocity: { x: 0, y: 0 },
-      acceleration: { x: 0, y: 0 },
-      health: stats.maxHealth,
-      maxHealth: stats.maxHealth,
-      radius: stats.radius,
-      targetId: null,
-      lastAttackTime: 0,
-      lastHitTime: 0,
-      state: 'IDLE',
-      // Stagger AI updates to prevent spikes
-      nextTargetUpdate: Date.now() + Math.random() * 500
-    };
-    this.units.push(unit);
-    this.unitMap.set(unit.id, unit);
+    
+    Position.x[eid] = x;
+    Position.y[eid] = y;
+    Velocity.x[eid] = 0;
+    Velocity.y[eid] = 0;
+    Force.x[eid] = 0;
+    Force.y[eid] = 0;
+    
+    UnitComponent.team[eid] = teamStr === TEAM_RED ? TEAM_ID_RED : TEAM_ID_BLUE;
+    UnitComponent.type[eid] = stats.typeId;
+    UnitComponent.health[eid] = stats.maxHealth;
+    UnitComponent.maxHealth[eid] = stats.maxHealth;
+    UnitComponent.radius[eid] = stats.radius;
+    UnitComponent.range[eid] = stats.range;
+    UnitComponent.damage[eid] = stats.damage;
+    UnitComponent.attackSpeed[eid] = stats.attackSpeed;
+    UnitComponent.speed[eid] = stats.speed;
+    
+    UnitComponent.state[eid] = STATE_IDLE;
+    UnitComponent.targetId[eid] = 0;
+    UnitComponent.lastAttackTime[eid] = 0;
+    UnitComponent.lastHitTime[eid] = 0;
+    UnitComponent.nextTargetUpdate[eid] = Date.now() + Math.random() * 500;
+
+    if (teamStr === TEAM_RED) this.stats.redCount++;
+    else this.stats.blueCount++;
   }
 
-  // Get a particle from pool or create new
   private spawnParticle(x: number, y: number, color: string, speed: number, size: number, life: number) {
       let p: Particle;
       if (this.particlePool.length > 0) {
@@ -112,7 +234,7 @@ export class SimulationEngine {
           p.size = size;
       } else {
           p = {
-              id: uuidv4(), // ID isn't strictly needed for rendering but kept for type compliance
+              id: Math.random().toString(36).slice(2, 9),
               position: { x, y },
               velocity: { x: 0, y: 0 },
               life,
@@ -121,99 +243,87 @@ export class SimulationEngine {
               size
           };
       }
-      
       const angle = Math.random() * Math.PI * 2;
       p.velocity.x = Math.cos(angle) * speed;
       p.velocity.y = Math.sin(angle) * speed;
-      
       this.particles.push(p);
   }
 
-  private updateGrid() {
-    // Fast clear
+  private updateGrid(ents: number[]) {
     for (let i = 0; i < GRID_CELLS; i++) {
       this.grid[i].length = 0;
     }
 
-    // Populate
-    const len = this.units.length;
+    const len = ents.length;
     for (let i = 0; i < len; i++) {
-      const u = this.units[i];
-      // Fast floor
-      const cx = (u.position.x / GRID_SIZE) | 0;
-      const cy = (u.position.y / GRID_SIZE) | 0;
+      const eid = ents[i];
+      const cx = (Position.x[eid] / GRID_SIZE) | 0;
+      const cy = (Position.y[eid] / GRID_SIZE) | 0;
 
-      // Bounds check for safety
       if (cx >= 0 && cx < GRID_COLS && cy >= 0 && cy < GRID_ROWS) {
-        this.grid[cx + cy * GRID_COLS].push(u);
+        this.grid[cx + cy * GRID_COLS].push(eid);
       }
     }
   }
 
-  private findTarget(unit: Unit): Unit | null {
-    // 1. Check if current target is valid (Quick check)
-    if (unit.targetId) {
-      const currentTarget = this.unitMap.get(unit.targetId);
-      if (currentTarget && currentTarget.health > 0) {
-        const dx = currentTarget.position.x - unit.position.x;
-        const dy = currentTarget.position.y - unit.position.y;
-        const dSq = dx*dx + dy*dy;
-        
-        // Hysteresis: Keep target slightly longer than vision range
-        if (dSq <= (VISION_RANGE * 1.2) ** 2) {
-           return currentTarget;
+  private findTarget(eid: number): number {
+    const myTeam = UnitComponent.team[eid];
+    const px = Position.x[eid];
+    const py = Position.y[eid];
+    
+    // Quick check current target
+    const currentTgt = UnitComponent.targetId[eid];
+    if (currentTgt > 0) {
+        if (UnitComponent.health[currentTgt] > 0) {
+            const dx = Position.x[currentTgt] - px;
+            const dy = Position.y[currentTgt] - py;
+            if (dx*dx + dy*dy <= (VISION_RANGE * 1.2) ** 2) {
+                return currentTgt;
+            }
         }
-      }
     }
 
-    // 2. Search for new target (Spatial Grid)
-    const cx = (unit.position.x / GRID_SIZE) | 0;
-    const cy = (unit.position.y / GRID_SIZE) | 0;
+    // Grid search
+    const cx = (px / GRID_SIZE) | 0;
+    const cy = (py / GRID_SIZE) | 0;
     const searchRad = Math.ceil(VISION_RANGE / GRID_SIZE);
-    
-    let closest: Unit | null = null;
-    let minDSq = Infinity;
     const visionSq = VISION_RANGE * VISION_RANGE;
+
+    let closest = 0;
+    let minDSq = Infinity;
 
     for (let y = -searchRad; y <= searchRad; y++) {
         for (let x = -searchRad; x <= searchRad; x++) {
             const nx = cx + x;
             const ny = cy + y;
-            
             if (nx >= 0 && nx < GRID_COLS && ny >= 0 && ny < GRID_ROWS) {
                 const cell = this.grid[nx + ny * GRID_COLS];
                 const cellLen = cell.length;
-                // Reverse loop sometimes helps with cache locality if we just added them, but standard is fine
-                for(let i = 0; i < cellLen; i++) {
+                for(let i=0; i<cellLen; i++) {
                     const other = cell[i];
-                    if (other.team !== unit.team && other.health > 0) {
-                        const dx = other.position.x - unit.position.x;
-                        const dy = other.position.y - unit.position.y;
-                        const dSq = dx*dx + dy*dy;
-                        
-                        if (dSq < minDSq && dSq <= visionSq) {
-                            minDSq = dSq;
-                            closest = other;
-                        }
+                    if (UnitComponent.team[other] !== myTeam && UnitComponent.health[other] > 0) {
+                         const dx = Position.x[other] - px;
+                         const dy = Position.y[other] - py;
+                         const dSq = dx*dx + dy*dy;
+                         if (dSq < minDSq && dSq <= visionSq) {
+                             minDSq = dSq;
+                             closest = other;
+                         }
                     }
                 }
             }
         }
     }
-    
     return closest;
   }
 
-  // Iterative Position Correction (Stable Hard Collisions)
-  private resolveCollisions() {
-      const len = this.units.length;
-      
+  private resolveCollisions(ents: number[]) {
+      const len = ents.length;
       for (let i = 0; i < len; i++) {
-          const unit = this.units[i];
-          const cx = (unit.position.x / GRID_SIZE) | 0;
-          const cy = (unit.position.y / GRID_SIZE) | 0;
+          const eid = ents[i];
+          const cx = (Position.x[eid] / GRID_SIZE) | 0;
+          const cy = (Position.y[eid] / GRID_SIZE) | 0;
 
-          // Check neighbors 3x3
           for (let yOff = -1; yOff <= 1; yOff++) {
               for (let xOff = -1; xOff <= 1; xOff++) {
                   const nx = cx + xOff;
@@ -223,38 +333,31 @@ export class SimulationEngine {
                       const cellLen = cell.length;
                       for (let j = 0; j < cellLen; j++) {
                           const other = cell[j];
-                          if (other === unit) continue;
+                          if (other === eid) continue;
 
-                          const dx = unit.position.x - other.position.x;
-                          const dy = unit.position.y - other.position.y;
+                          const dx = Position.x[eid] - Position.x[other];
+                          const dy = Position.y[eid] - Position.y[other];
                           const distSq = dx*dx + dy*dy;
                           
-                          let minDist = unit.radius + other.radius;
+                          let minDist = UnitComponent.radius[eid] + UnitComponent.radius[other];
                           
-                          // Apply Overlap Tolerance for Allies
-                          if (unit.team === other.team) {
+                          if (UnitComponent.team[eid] === UnitComponent.team[other]) {
                               minDist *= (1.0 - this.allyOverlapTolerance);
                           } else {
-                              // Enemies: Keep a tiny gap to prevent sticking
                               minDist += 1;
                           }
                           
-                          // If overlapping
                           if (distSq > 0 && distSq < minDist * minDist) {
                               const dist = Math.sqrt(distSq);
                               const penetration = minDist - dist;
-                              const moveAmt = penetration * 0.5; // Split move
-                              
+                              const moveAmt = penetration * 0.5;
                               const nx = dx / dist;
                               const ny = dy / dist;
                               
-                              // Displace Unit
-                              unit.position.x += nx * moveAmt;
-                              unit.position.y += ny * moveAmt;
-                              
-                              // Displace Other
-                              other.position.x -= nx * moveAmt;
-                              other.position.y -= ny * moveAmt;
+                              Position.x[eid] += nx * moveAmt;
+                              Position.y[eid] += ny * moveAmt;
+                              Position.x[other] -= nx * moveAmt;
+                              Position.y[other] -= ny * moveAmt;
                           }
                       }
                   }
@@ -264,272 +367,259 @@ export class SimulationEngine {
   }
 
   update(deltaTime: number) {
+    if (!this.world) return;
     this.stats.totalTime += deltaTime;
     const dt = Math.min(deltaTime, 0.05);
     const now = Date.now();
+    
+    const ents = unitQuery(this.world);
+    const len = ents.length;
 
-    // 1. Logic & Steering Integration (Move Logic)
-    // We update velocity and tentative position here, ignoring collisions for now.
-    const activeLen = this.units.length;
-    for (let i = 0; i < activeLen; i++) {
-        const unit = this.units[i];
-        const stats = UNIT_STATS[unit.type];
+    // 1. AI & Steering
+    for(let i=0; i<len; i++) {
+        const eid = ents[i];
         
-        // --- TARGETING AI (Throttled) ---
-        if (now > unit.nextTargetUpdate) {
-            const t = this.findTarget(unit);
-            unit.targetId = t ? t.id : null;
-            // Update next time between 200ms and 400ms (staggered)
-            unit.nextTargetUpdate = now + 200 + Math.random() * 200;
+        // --- TARGETING ---
+        if (now > UnitComponent.nextTargetUpdate[eid]) {
+            UnitComponent.targetId[eid] = this.findTarget(eid);
+            UnitComponent.nextTargetUpdate[eid] = now + 200 + Math.random() * 200;
         }
 
-        // --- STEERING FORCES ---
-        let seekX = 0;
-        let seekY = 0;
-        let target: Unit | undefined;
-
-        if (unit.targetId) {
-             target = this.unitMap.get(unit.targetId);
-             if (!target) unit.targetId = null;
-        }
-
-        if (target) {
-            const dx = target.position.x - unit.position.x;
-            const dy = target.position.y - unit.position.y;
+        let seekX = 0, seekY = 0;
+        const target = UnitComponent.targetId[eid];
+        
+        // --- COMBAT / SEEK ---
+        let hasTarget = false;
+        if (target > 0 && UnitComponent.health[target] > 0) {
+            hasTarget = true;
+            const dx = Position.x[target] - Position.x[eid];
+            const dy = Position.y[target] - Position.y[eid];
             const dist = Math.sqrt(dx*dx + dy*dy);
-            const attackRange = stats.range + unit.radius + target.radius;
+            const range = UnitComponent.range[eid] + UnitComponent.radius[eid] + UnitComponent.radius[target];
 
-            if (dist <= attackRange) {
-                // ATTACKING
-                unit.state = 'ATTACKING';
-                // Stop moving
-                unit.velocity.x *= 0.8;
-                unit.velocity.y *= 0.8;
+            if (dist <= range) {
+                UnitComponent.state[eid] = STATE_ATTACKING;
+                Velocity.x[eid] *= 0.8;
+                Velocity.y[eid] *= 0.8;
                 
-                if (now - unit.lastAttackTime > stats.attackSpeed) {
-                    target.health -= stats.damage;
-                    target.lastHitTime = now;
-                    unit.lastAttackTime = now;
-                    // Spark effect
+                if (now - UnitComponent.lastAttackTime[eid] > UnitComponent.attackSpeed[eid]) {
+                    UnitComponent.health[target] -= UnitComponent.damage[eid];
+                    UnitComponent.lastHitTime[target] = now;
+                    UnitComponent.lastAttackTime[eid] = now;
+                    // Visual
                     this.spawnParticle(
-                        unit.position.x + (dx/dist)*unit.radius, 
-                        unit.position.y + (dy/dist)*unit.radius,
+                        Position.x[eid] + (dx/dist)*UnitComponent.radius[eid],
+                        Position.y[eid] + (dy/dist)*UnitComponent.radius[eid],
                         '#ffffff', 100, 2, 0.2
                     );
                 }
             } else {
-                // CHASING
-                unit.state = 'MOVING';
-                seekX = (dx / dist) * (stats.speed * 60);
-                seekY = (dy / dist) * (stats.speed * 60);
+                UnitComponent.state[eid] = STATE_MOVING;
+                const speed = UnitComponent.speed[eid] * 60;
+                seekX = (dx / dist) * speed;
+                seekY = (dy / dist) * speed;
             }
         } else {
-            // MARCHING
-            unit.state = 'MOVING';
-            const targetX = unit.team === TEAM_RED ? CANVAS_WIDTH - 50 : 50;
-            const targetY = unit.position.y * 0.95 + (CANVAS_HEIGHT/2) * 0.05; // Gently steer to center Y
-            const dx = targetX - unit.position.x;
-            const dy = targetY - unit.position.y;
-            const dist = Math.sqrt(dx*dx + dy*dy);
+            UnitComponent.targetId[eid] = 0; // Clear dead target
+        }
+
+        // --- MARCHING (Flow Field) ---
+        if (!hasTarget) {
+            UnitComponent.state[eid] = STATE_MOVING;
+            const fx = (Position.x[eid] / 40) | 0;
+            const fy = (Position.y[eid] / 40) | 0;
             
-            if (dist > 50) {
-                seekX = (dx / dist) * (stats.speed * 40);
-                seekY = (dy / dist) * (stats.speed * 40);
+            if (fx >= 0 && fx < Math.ceil(CANVAS_WIDTH/40) && fy >= 0 && fy < Math.ceil(CANVAS_HEIGHT/40)) {
+                const idx = (fx + fy * Math.ceil(CANVAS_WIDTH/40)) * 2;
+                const field = UnitComponent.team[eid] === TEAM_ID_RED ? this.redFlowField : this.blueFlowField;
+                const speed = UnitComponent.speed[eid] * 50;
+                seekX = field[idx] * speed;
+                seekY = field[idx+1] * speed;
             } else {
-                unit.state = 'IDLE';
-                unit.velocity.x *= 0.9;
-                unit.velocity.y *= 0.9;
+                // Center bias
+                seekX = (CANVAS_WIDTH/2 - Position.x[eid]) * 0.1;
+                seekY = (CANVAS_HEIGHT/2 - Position.y[eid]) * 0.1;
             }
         }
-        
-        // --- FLOCKING (Alignment & Cohesion) ---
-        // Only apply when moving to simulate formation
-        if (unit.state === 'MOVING') {
-            let neighborCount = 0;
-            let alignX = 0, alignY = 0;
-            let cohereX = 0, cohereY = 0;
-            
-            const cx = (unit.position.x / GRID_SIZE) | 0;
-            const cy = (unit.position.y / GRID_SIZE) | 0;
-            const flockRangeSq = (unit.radius * 6) ** 2; // Perception radius
 
-            // Check grid neighbors (using grid from previous frame, which is fine)
+        // --- FLOCKING ---
+        if (UnitComponent.state[eid] === STATE_MOVING) {
+            let n = 0, ax = 0, ay = 0, cx = 0, cy = 0;
+            const px = Position.x[eid];
+            const py = Position.y[eid];
+            const cxIdx = (px / GRID_SIZE) | 0;
+            const cyIdx = (py / GRID_SIZE) | 0;
+            const rangeSq = (UnitComponent.radius[eid] * 6) ** 2;
+
             for (let yOff = -1; yOff <= 1; yOff++) {
                 for (let xOff = -1; xOff <= 1; xOff++) {
-                    const nx = cx + xOff;
-                    const ny = cy + yOff;
+                    const nx = cxIdx + xOff;
+                    const ny = cyIdx + yOff;
                     if (nx >= 0 && nx < GRID_COLS && ny >= 0 && ny < GRID_ROWS) {
                         const cell = this.grid[nx + ny * GRID_COLS];
                         const cellLen = cell.length;
                         for(let j=0; j<cellLen; j++) {
                             const other = cell[j];
-                            if (other === unit) continue;
-                            
-                            // Only flock with teammates
-                            if (other.team === unit.team) {
-                                const dx = other.position.x - unit.position.x;
-                                const dy = other.position.y - unit.position.y;
-                                const dSq = dx*dx + dy*dy;
-
-                                if (dSq < flockRangeSq) {
-                                    // Alignment: match velocity
-                                    alignX += other.velocity.x;
-                                    alignY += other.velocity.y;
-                                    
-                                    // Cohesion: steer to center
-                                    cohereX += other.position.x;
-                                    cohereY += other.position.y;
-                                    
-                                    neighborCount++;
+                            if (other === eid) continue;
+                            if (UnitComponent.team[other] === UnitComponent.team[eid]) {
+                                const dx = Position.x[other] - px;
+                                const dy = Position.y[other] - py;
+                                if (dx*dx + dy*dy < rangeSq) {
+                                    ax += Velocity.x[other];
+                                    ay += Velocity.y[other];
+                                    cx += Position.x[other];
+                                    cy += Position.y[other];
+                                    n++;
                                 }
                             }
                         }
                     }
                 }
             }
-            
-            if (neighborCount > 0) {
-                // Alignment Force
-                alignX /= neighborCount;
-                alignY /= neighborCount;
-                const alignMag = Math.sqrt(alignX*alignX + alignY*alignY);
-                if (alignMag > 0) {
-                    // Weight: 20.0 (Keep moving in same direction)
-                    seekX += (alignX / alignMag) * (stats.speed * 20.0);
-                    seekY += (alignY / alignMag) * (stats.speed * 20.0);
+
+            if (n > 0) {
+                const speed = UnitComponent.speed[eid];
+                ax /= n; ay /= n;
+                const aMag = Math.sqrt(ax*ax + ay*ay);
+                if (aMag > 0) {
+                    seekX += (ax / aMag) * (speed * 20.0);
+                    seekY += (ay / aMag) * (speed * 20.0);
                 }
-                
-                // Cohesion Force
-                cohereX /= neighborCount;
-                cohereY /= neighborCount;
-                // Vector to center of mass
-                let cohereDirX = cohereX - unit.position.x;
-                let cohereDirY = cohereY - unit.position.y;
-                const cohereMag = Math.sqrt(cohereDirX*cohereDirX + cohereDirY*cohereDirY);
-                if (cohereMag > 0) {
-                    // Weight: 10.0 (Gentle grouping)
-                    seekX += (cohereDirX / cohereMag) * (stats.speed * 10.0);
-                    seekY += (cohereDirY / cohereMag) * (stats.speed * 10.0);
+                cx /= n; cy /= n;
+                const dx = cx - px;
+                const dy = cy - py;
+                const cMag = Math.sqrt(dx*dx + dy*dy);
+                if (cMag > 0) {
+                    seekX += (dx / cMag) * (speed * 10.0);
+                    seekY += (dy / cMag) * (speed * 10.0);
                 }
             }
         }
 
-        // Boundary Avoidance (Soft push)
-        let boundX = 0;
-        let boundY = 0;
-        const margin = 40;
-        if (unit.position.x < margin) boundX = 150;
-        else if (unit.position.x > CANVAS_WIDTH - margin) boundX = -150;
-        if (unit.position.y < margin) boundY = 150;
-        else if (unit.position.y > CANVAS_HEIGHT - margin) boundY = -150;
+        // --- BOUNDS ---
+        let bx = 0, by = 0;
+        const m = 40;
+        if (Position.x[eid] < m) bx = 150;
+        else if (Position.x[eid] > CANVAS_WIDTH - m) bx = -150;
+        if (Position.y[eid] < m) by = 150;
+        else if (Position.y[eid] > CANVAS_HEIGHT - m) by = -150;
 
-        // Apply Forces
-        if (unit.state === 'MOVING' || unit.state === 'IDLE') {
-             // acceleration = forces
-             unit.acceleration.x = seekX + boundX;
-             unit.acceleration.y = seekY + boundY;
-
-             // velocity += acceleration * dt
-             unit.velocity.x += unit.acceleration.x * dt;
-             unit.velocity.y += unit.acceleration.y * dt;
-
-             // Speed Limit
-             const maxSpeed = stats.speed * 60;
-             const vSq = unit.velocity.x * unit.velocity.x + unit.velocity.y * unit.velocity.y;
-             if (vSq > maxSpeed * maxSpeed) {
-                 const vMag = Math.sqrt(vSq);
-                 unit.velocity.x = (unit.velocity.x / vMag) * maxSpeed;
-                 unit.velocity.y = (unit.velocity.y / vMag) * maxSpeed;
-             }
+        // --- INTEGRATION ---
+        if (UnitComponent.state[eid] === STATE_MOVING) {
+            Force.x[eid] = seekX + bx;
+            Force.y[eid] = seekY + by;
+            
+            Velocity.x[eid] += Force.x[eid] * dt;
+            Velocity.y[eid] += Force.y[eid] * dt;
+            
+            const maxSpeed = UnitComponent.speed[eid] * 60;
+            const vSq = Velocity.x[eid]*Velocity.x[eid] + Velocity.y[eid]*Velocity.y[eid];
+            if (vSq > maxSpeed*maxSpeed) {
+                const vm = Math.sqrt(vSq);
+                Velocity.x[eid] = (Velocity.x[eid] / vm) * maxSpeed;
+                Velocity.y[eid] = (Velocity.y[eid] / vm) * maxSpeed;
+            }
         }
 
-        // Apply Velocity to Position (Integration)
-        unit.position.x += unit.velocity.x * dt;
-        unit.position.y += unit.velocity.y * dt;
-
-        // Hard Screen Clamp
-        if(unit.position.x < unit.radius) unit.position.x = unit.radius;
-        if(unit.position.x > CANVAS_WIDTH - unit.radius) unit.position.x = CANVAS_WIDTH - unit.radius;
-        if(unit.position.y < unit.radius) unit.position.y = unit.radius;
-        if(unit.position.y > CANVAS_HEIGHT - unit.radius) unit.position.y = CANVAS_HEIGHT - unit.radius;
+        Position.x[eid] += Velocity.x[eid] * dt;
+        Position.y[eid] += Velocity.y[eid] * dt;
+        
+        // Hard Clamp
+        if (Position.x[eid] < 5) Position.x[eid] = 5;
+        if (Position.x[eid] > CANVAS_WIDTH - 5) Position.x[eid] = CANVAS_WIDTH - 5;
+        if (Position.y[eid] < 5) Position.y[eid] = 5;
+        if (Position.y[eid] > CANVAS_HEIGHT - 5) Position.y[eid] = CANVAS_HEIGHT - 5;
     }
 
-    // 2. Spatial Partitioning Update
-    // We update the grid with the new tentative positions
-    this.updateGrid();
+    // 2. Spatial Update
+    this.updateGrid(ents);
 
-    // 3. Collision Resolution (Iterative Solver)
-    // Run multiple passes to stabilize the stack of units
-    const SOLVER_ITERATIONS = 2; 
+    // 3. Collisions
+    const SOLVER_ITERATIONS = 2;
     for(let k=0; k<SOLVER_ITERATIONS; k++) {
-        this.resolveCollisions();
+        this.resolveCollisions(ents);
     }
 
-    // 4. Lifecycle & Clean up
-    let writeIdx = 0;
+    // 4. Lifecycle (Cleanup Dead)
     let rCount = 0;
     let bCount = 0;
-    const initialLen = this.units.length;
     
-    for(let i = 0; i < initialLen; i++) {
-        const unit = this.units[i];
-        if(unit.health > 0) {
-            // Keep unit
-            if (i !== writeIdx) {
-                this.units[writeIdx] = unit;
-            }
-            if(unit.team === TEAM_RED) rCount++; else bCount++;
-            writeIdx++;
-        } else {
-            // Death Logic
-            if (unit.team === TEAM_RED) this.stats.redCasualties++;
+    for(let i=0; i<len; i++) {
+        const eid = ents[i];
+        if (UnitComponent.health[eid] <= 0) {
+            if (UnitComponent.team[eid] === TEAM_ID_RED) this.stats.redCasualties++;
             else this.stats.blueCasualties++;
-            this.unitMap.delete(unit.id);
             
-            // Death Particles
+            // Explosion
             for(let j=0; j<5; j++) {
                 this.spawnParticle(
-                    unit.position.x, unit.position.y,
-                    unit.team === TEAM_RED ? COLOR_RED : COLOR_BLUE,
+                    Position.x[eid], Position.y[eid],
+                    UnitComponent.team[eid] === TEAM_ID_RED ? COLOR_RED : COLOR_BLUE,
                     Math.random() * 100 + 50,
                     Math.random() * 3 + 2,
                     0.6
                 );
             }
+            removeEntity(this.world, eid);
+        } else {
+            if (UnitComponent.team[eid] === TEAM_ID_RED) rCount++;
+            else bCount++;
         }
     }
-    this.units.length = writeIdx;
+    
     this.stats.redCount = rCount;
     this.stats.blueCount = bCount;
 
-    // 5. Update Particles
-    let pWriteIdx = 0;
-    const pLen = this.particles.length;
-    for(let i=0; i<pLen; i++) {
+    // 5. Particles
+    let pWrite = 0;
+    for(let i=0; i<this.particles.length; i++) {
         const p = this.particles[i];
         p.life -= dt;
         if(p.life > 0) {
             p.position.x += p.velocity.x * dt;
             p.position.y += p.velocity.y * dt;
-            
-            if (i !== pWriteIdx) {
-                this.particles[pWriteIdx] = p;
-            }
-            pWriteIdx++;
+            if(i !== pWrite) this.particles[pWrite] = p;
+            pWrite++;
         } else {
-            // Recycle
             this.particlePool.push(p);
         }
     }
-    this.particles.length = pWriteIdx;
+    this.particles.length = pWrite;
   }
 
-  getState(): SimulationState {
-    return {
-      units: [...this.units],
-      particles: [...this.particles],
-      stats: { ...this.stats },
-      isRunning: true
-    };
+  // Snapshot for UI/AI
+  getSnapshot(): UnitView[] {
+      if (!this.world) return [];
+      const ents = unitQuery(this.world);
+      const views: UnitView[] = [];
+      const len = ents.length;
+      
+      const typeMap: Record<number, UnitType> = {
+          [TYPE_ID_SOLDIER]: UnitType.SOLDIER,
+          [TYPE_ID_TANK]: UnitType.TANK,
+          [TYPE_ID_ARCHER]: UnitType.ARCHER
+      };
+      
+      const stateMap: Record<number, string> = {
+          [STATE_IDLE]: 'IDLE',
+          [STATE_MOVING]: 'MOVING',
+          [STATE_ATTACKING]: 'ATTACKING'
+      };
+
+      for(let i=0; i<len; i++) {
+          const eid = ents[i];
+          views.push({
+              id: eid,
+              team: UnitComponent.team[eid] === TEAM_ID_RED ? TEAM_RED : TEAM_BLUE,
+              type: typeMap[UnitComponent.type[eid]] || UnitType.SOLDIER,
+              x: Position.x[eid],
+              y: Position.y[eid],
+              health: UnitComponent.health[eid],
+              maxHealth: UnitComponent.maxHealth[eid],
+              radius: UnitComponent.radius[eid],
+              state: stateMap[UnitComponent.state[eid]] || 'IDLE'
+          });
+      }
+      return views;
   }
 }
